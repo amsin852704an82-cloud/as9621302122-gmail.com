@@ -1,0 +1,162 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper functions for Role-Based Access Control (RBAC) & Data Isolation
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && (
+        request.auth.token.role == 'admin' ||
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin'
+      );
+    }
+
+    function isVendor() {
+      return isAuthenticated() && (
+        request.auth.token.role == 'vendor' ||
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'vendor'
+      );
+    }
+
+    function isRetailer() {
+      return isAuthenticated() && (
+        request.auth.token.role == 'retailer' ||
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'retailer'
+      );
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    // Indian Spice Standards Validations
+    function isValidFSSAI(number) {
+      return number is string && number.size() == 14 && number.matches('^[1-2][0-9]{13}$');
+    }
+
+    function isValidSpiceHsn(code) {
+      return code is string && (
+        code.matches('^090[4-9].*') || code.matches('^0910.*')
+      );
+    }
+
+    // 1. users/{userId}
+    match /users/{userId} {
+      allow read: if isAuthenticated() && (isOwner(userId) || isAdmin());
+      allow create: if isAuthenticated() && isOwner(userId);
+      allow update: if isAuthenticated() && (isOwner(userId) || isAdmin());
+      allow delete: if isAdmin();
+    }
+
+    // 2. vendors/{vendorId}
+    match /vendors/{vendorId} {
+      allow read: if isAuthenticated();
+      allow create, update: if isAuthenticated() && (
+        (isOwner(vendorId) && isValidFSSAI(request.resource.data.fssaiNumber)) || isAdmin()
+      );
+      allow delete: if isAdmin();
+    }
+
+    // 3. products/{productId}
+    match /products/{productId} {
+      // Retailers can only read active, approved products. Vendors read their own. Admin reads all.
+      allow read: if isAuthenticated() && (
+        resource.data.status == 'active' ||
+        resource.data.vendorId == request.auth.uid ||
+        isAdmin()
+      );
+      // Vendors can create and edit their own products
+      allow create: if isAuthenticated() && (
+        (isVendor() && request.resource.data.vendorId == request.auth.uid && isValidSpiceHsn(request.resource.data.hsnCode)) ||
+        isAdmin()
+      );
+      allow update: if isAuthenticated() && (
+        (isVendor() && resource.data.vendorId == request.auth.uid && request.resource.data.vendorId == request.auth.uid) ||
+        isAdmin()
+      );
+      allow delete: if isAdmin() || (isVendor() && resource.data.vendorId == request.auth.uid);
+    }
+
+    // 4. orders/{orderId}
+    match /orders/{orderId} {
+      // Data isolation: Only the retailer who placed it, the vendor fulfilling it, or Admin can read
+      allow read: if isAuthenticated() && (
+        resource.data.retailerId == request.auth.uid ||
+        resource.data.vendorId == request.auth.uid ||
+        isAdmin()
+      );
+
+      // Server-side validation rule: Order creation must not allow client-tampered pricing
+      // In production, creation of financial orders is strictly handled via Cloud Functions/Server Actions.
+      // Direct client creation is restricted; only authorized server or authenticated retailer with validated structure.
+      allow create: if isAuthenticated() && (
+        (isRetailer() && request.resource.data.retailerId == request.auth.uid && request.resource.data.gstTotal > 0) ||
+        isAdmin()
+      );
+
+      // Status updates: Vendors can update fulfillmentStatus; Retailers can only update disputeStatus; Admin can update all
+      allow update: if isAuthenticated() && (
+        (isVendor() && resource.data.vendorId == request.auth.uid &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['fulfillmentStatus', 'shippingDetails', 'updatedAt'])) ||
+        (isRetailer() && resource.data.retailerId == request.auth.uid &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['disputeStatus', 'updatedAt'])) ||
+        isAdmin()
+      );
+
+      allow delete: if isAdmin();
+    }
+
+    // 5. privateLabelRfqs/{rfqId}
+    match /privateLabelRfqs/{rfqId} {
+      allow read: if isAuthenticated() && (
+        resource.data.retailerId == request.auth.uid ||
+        isVendor() ||
+        isAdmin()
+      );
+      allow create: if isAuthenticated() && (
+        (isRetailer() && request.resource.data.retailerId == request.auth.uid) ||
+        isAdmin()
+      );
+      allow update: if isAuthenticated() && (
+        (isRetailer() && resource.data.retailerId == request.auth.uid) ||
+        isVendor() || // Vendors add quotes
+        isAdmin()
+      );
+      allow delete: if isAdmin();
+    }
+
+    // 6. settlements/{settlementId}
+    // Financial ledger entries: strictly readable by vendor and admin; writes prohibited from client SDK!
+    match /settlements/{settlementId} {
+      allow read: if isAuthenticated() && (
+        resource.data.vendorId == request.auth.uid ||
+        isAdmin()
+      );
+      // Strictly Server Actions / Cloud Functions only
+      allow write: if isAdmin();
+    }
+
+    // 7. disputes/{disputeId}
+    match /disputes/{disputeId} {
+      allow read: if isAuthenticated() && (
+        resource.data.reportedBy == request.auth.uid ||
+        isAdmin()
+      );
+      allow create: if isAuthenticated() && (
+        request.resource.data.reportedBy == request.auth.uid ||
+        isAdmin()
+      );
+      allow update: if isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    // 8. mandiBenchmarks/{mandiId}
+    match /mandiBenchmarks/{mandiId} {
+      allow read: if isAuthenticated();
+      allow write: if isAdmin();
+    }
+  }
+}

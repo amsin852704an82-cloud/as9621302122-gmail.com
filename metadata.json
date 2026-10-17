@@ -1,0 +1,6 @@
+{
+  "name": "BharatSpice B2B - Spice Marketplace & AI Intelligence",
+  "description": "India's premier B2B spice marketplace connecting Mandi vendors with Kirana retailers, featuring Gemini AI cataloging, Agmark/FSSAI compliance checks, multilingual voice queries, private-label RFQ estimation, and automated dispute triage.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
